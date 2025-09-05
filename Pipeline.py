@@ -2,19 +2,20 @@ from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel, Field
 import requests
 import os
-import time
 import json
 from logging import getLogger
+import time
 
 logger = getLogger(__name__)
 logger.setLevel("DEBUG")
 
 class Pipeline:
+    """
+    Eine Pipeline, die Whoogle für die Web-Suche und Crawl4AI für das Crawling verwendet.
+    """
     class Valves(BaseModel):
         WHOOGLE_URL: str = Field(default="http://10.10.10.90:5001", description="URL for your Whoogle instance")
         CRAWL4AI_URL: str = Field(default="http://10.10.10.90:11235", description="Base URL for your Crawl4AI instance")
-        WHOOGLE_API_KEY: str = Field(default="", description="API key for Whoogle, if required")
-        CRAWL4AI_API_KEY: str = Field(default="", description="API key for Crawl4AI, if required")
         MAX_URLS: int = Field(default=5, description="Maximum number of URLs to crawl")
 
     def __init__(self):
@@ -36,18 +37,21 @@ class Pipeline:
         Ruft URLs von der Whoogle-Instanz ab.
         """
         try:
-            # Die Whoogle-API erwartet eine GET-Anfrage
+            # Senden der Abfrage als URL-Parameter
             response = requests.get(
-                f"{self.valves.WHOOGLE_URL}/search?q={query}",
+                f"{self.valves.WHOOGLE_URL}/search",
+                params={'q': query},
                 timeout=5
             )
             response.raise_for_status()
             search_results = response.json()
             
-            # Annahme: Whoogle-API gibt ein spezifisches Format zurück
-            urls = [
-                result['link'] for result in search_results.get('results', [])
-            ]
+            # Überprüfen des Suchergebnis-Formats und Extrahieren der Links
+            urls = []
+            if 'results' in search_results:
+                for result in search_results['results']:
+                    if 'link' in result:
+                        urls.append(result['link'])
             
             logger.info(f"Whoogle-Suche für '{query}' ergab {len(urls)} URLs.")
             return urls[:self.valves.MAX_URLS]
@@ -74,7 +78,6 @@ class Pipeline:
                 response.raise_for_status()
                 crawled_data = response.json()
                 
-                # Extrahieren des bereinigten Textes
                 if 'text' in crawled_data:
                     content += f"\n\n### Inhalt von: {url}\n"
                     content += crawled_data['text']
