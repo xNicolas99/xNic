@@ -37,22 +37,22 @@ class Pipeline:
         Ruft URLs von der Whoogle-Instanz ab.
         """
         try:
-            # Senden der Abfrage als URL-Parameter
-            response = requests.get(
+            # Senden einer POST-Anfrage mit dem Suchbegriff im Daten-Body
+            response = requests.post(
                 f"{self.valves.WHOOGLE_URL}/search",
-                params={'q': query},
+                data={'q': query},
                 timeout=5
             )
             response.raise_for_status()
             search_results = response.json()
-            
+
             # Überprüfen des Suchergebnis-Formats und Extrahieren der Links
             urls = []
             if 'results' in search_results:
                 for result in search_results['results']:
                     if 'link' in result:
                         urls.append(result['link'])
-            
+
             logger.info(f"Whoogle-Suche für '{query}' ergab {len(urls)} URLs.")
             return urls[:self.valves.MAX_URLS]
         except Exception as e:
@@ -114,3 +114,4 @@ class Pipeline:
 
         # Den gecrawlten Inhalt dem Modell als Kontext zurückgeben
         yield f"**Gefundene Informationen:**\n{crawled_content}\n\n**Antwort basierend auf den obigen Informationen:**"
+
