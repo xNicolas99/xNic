@@ -1,50 +1,113 @@
-from openui import tool
-from openui.pipelines.pipeline import Pipeline
-from openui.tools.websearch import WebSearch
-from openui.tools.webcrawler import WebCrawler
+from typing import List, Union, Generator, Iterator
+from pydantic import BaseModel, Field
+import requests
+import os
+import time
+import json
+from logging import getLogger
 
-# Ihre konfigurierten URLs aus Open WebUI
-WHOOGLE_URL = "http://10.10.10.90:5001"
-CRAWL4AI_URL = "http://10.10.10.90:11235/crawl"  # Stellen Sie sicher, dass dies der korrekte API-Endpunkt ist
+logger = getLogger(__name__)
+logger.setLevel("DEBUG")
 
-@tool
-class WhoogleSearch(WebSearch):
-    """
-    Ein Tool, um die Whoogle-Suche zu verwenden.
-    """
-    def __init__(self, api_url=WHOOGLE_URL, **kwargs):
-        super().__init__(api_url=api_url, **kwargs)
+class Pipeline:
+    class Valves(BaseModel):
+        WHOOGLE_URL: str = Field(default="http://10.10.10.90:5001", description="URL for your Whoogle instance")
+        CRAWL4AI_URL: str = Field(default="http://10.10.10.90:11235", description="Base URL for your Crawl4AI instance")
+        WHOOGLE_API_KEY: str = Field(default="", description="API key for Whoogle, if required")
+        CRAWL4AI_API_KEY: str = Field(default="", description="API key for Crawl4AI, if required")
+        MAX_URLS: int = Field(default=5, description="Maximum number of URLs to crawl")
 
-@tool
-class Crawl4AI(WebCrawler):
-    """
-    Ein Tool, um den Inhalt von URLs mit Crawl4AI zu crawlen.
-    """
-    def __init__(self, api_url=CRAWL4AI_URL, **kwargs):
-        super().__init__(api_url=api_url, **kwargs)
+    def __init__(self):
+        self.name = "Whoogle & Crawl4AI Pipeline"
+        self.valves = self.Valves(
+            **{k: os.getenv(k, v.default) for k, v in self.Valves.model_fields.items()}
+        )
 
-class WhoogleCrawlPipeline(Pipeline):
-    """
-    Eine Pipeline, die Whoogle zum Suchen und Crawl4AI zum Crawlen verwendet.
-    """
-    def run(self, query: str):
+    async def on_startup(self):
+        logger.debug(f"on_startup:{self.name}")
+        pass
+
+    async def on_shutdown(self):
+        logger.debug(f"on_shutdown:{self.name}")
+        pass
+
+    def _get_whoogle_urls(self, query: str) -> List[str]:
         """
-        Führt die Such- und Crawl-Schritte aus.
+        Ruft URLs von der Whoogle-Instanz ab.
         """
-        # Schritt 1: Suche nach den Top-5-URLs mit Whoogle.
-        # Passen Sie die Anzahl der Suchergebnisse bei Bedarf an.
-        search_tool = WhoogleSearch()
-        search_results = search_tool.search(query=query)
-        
-        # Extrahieren Sie die URLs aus den Suchergebnissen.
-        urls = [result.get('link') for result in search_results]
+        try:
+            # Die Whoogle-API erwartet eine GET-Anfrage
+            response = requests.get(
+                f"{self.valves.WHOOGLE_URL}/search?q={query}",
+                timeout=5
+            )
+            response.raise_for_status()
+            search_results = response.json()
+            
+            # Annahme: Whoogle-API gibt ein spezifisches Format zurück
+            urls = [
+                result['link'] for result in search_results.get('results', [])
+            ]
+            
+            logger.info(f"Whoogle-Suche für '{query}' ergab {len(urls)} URLs.")
+            return urls[:self.valves.MAX_URLS]
+        except Exception as e:
+            logger.error(f"Fehler bei der Whoogle-Suche: {e}")
+            return []
 
-        # Schritt 2: Crawlen des Inhalts der gefundenen URLs mit Crawl4AI.
-        crawl_tool = Crawl4AI()
-        crawled_content = crawl_tool.crawl(urls=urls)
-        
-        # Gibt den gecrawlten Inhalt zurück.
-        return crawled_content
+    def _get_crawled_content(self, urls: List[str]) -> str:
+        """
+        Crawlt den Inhalt von URLs mit Crawl4AI.
+        """
+        content = ""
+        for url in urls:
+            try:
+                # Crawl4AI-API erwartet eine POST-Anfrage
+                payload = {"url": url}
+                headers = {'Content-Type': 'application/json'}
+                response = requests.post(
+                    f"{self.valves.CRAWL4AI_URL}/crawl",
+                    data=json.dumps(payload),
+                    headers=headers,
+                    timeout=10
+                )
+                response.raise_for_status()
+                crawled_data = response.json()
+                
+                # Extrahieren des bereinigten Textes
+                if 'text' in crawled_data:
+                    content += f"\n\n### Inhalt von: {url}\n"
+                    content += crawled_data['text']
+                
+            except Exception as e:
+                logger.error(f"Fehler beim Crawling von {url}: {e}")
+                continue
+        return content
 
-# Fügen Sie diese Zeile am Ende der Datei hinzu, um die Pipeline zu registrieren.
-pipeline = WhoogleCrawlPipeline()
+    def pipe(
+        self,
+        user_message: str,
+        model_id: str,
+        messages: List[dict],
+        body: dict
+    ) -> Union[str, Generator, Iterator]:
+        logger.info(f"Pipe-Aufruf mit: {user_message}")
+
+        # Suchbegriff ist die letzte Nachricht des Benutzers
+        query = user_message.strip()
+        
+        # Schritt 1: URLs über Whoogle abrufen
+        urls = self._get_whoogle_urls(query)
+        if not urls:
+            yield "Keine relevanten URLs gefunden."
+            return
+
+        # Schritt 2: Inhalt der URLs mit Crawl4AI crawlen
+        crawled_content = self._get_crawled_content(urls)
+        
+        if not crawled_content:
+            yield "Inhalt konnte nicht extrahiert werden."
+            return
+
+        # Den gecrawlten Inhalt dem Modell als Kontext zurückgeben
+        yield f"**Gefundene Informationen:**\n{crawled_content}\n\n**Antwort basierend auf den obigen Informationen:**"
